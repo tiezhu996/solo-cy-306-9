@@ -98,6 +98,15 @@ func (h *ActivityHandler) Update(c *gin.Context) {
 	}
 	fields := map[string]any{"title": req.Title, "description": req.Description, "cover_image": req.CoverImage,
 		"activity_type": req.ActivityType, "location": req.Location}
+	if req.StartTime != nil {
+		fields["start_time"] = *req.StartTime
+	}
+	if req.EndTime != nil {
+		fields["end_time"] = *req.EndTime
+	}
+	if req.SignupDeadline != nil {
+		fields["signup_deadline"] = *req.SignupDeadline
+	}
 	if req.Capacity != nil {
 		fields["capacity"] = *req.Capacity
 	}

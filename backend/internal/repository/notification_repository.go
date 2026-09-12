@@ -32,6 +32,22 @@ func (r *NotificationRepository) CreateTx(tx *gorm.DB, n *model.Notification) er
 	return nil
 }
 
+// BatchCreate 批量创建通知（同一内容分发给多个用户）。
+func (r *NotificationRepository) BatchCreate(list []*model.Notification) error {
+	return r.BatchCreateTx(r.db, list)
+}
+
+// BatchCreateTx 在事务内批量创建通知。
+func (r *NotificationRepository) BatchCreateTx(tx *gorm.DB, list []*model.Notification) error {
+	if len(list) == 0 {
+		return nil
+	}
+	if err := tx.CreateInBatches(list, 200).Error; err != nil {
+		return fmt.Errorf("batch create notifications: %w", err)
+	}
+	return nil
+}
+
 // ListByUser 查询某用户通知列表。
 func (r *NotificationRepository) ListByUser(userID uint64, page, pageSize int) ([]model.Notification, int64, error) {
 	var list []model.Notification

@@ -6,10 +6,11 @@ const (
 	NotificationReminder       = "reminder"
 	NotificationReviewResult   = "review_result"
 	NotificationCheckinSuccess = "checkin_success"
+	NotificationActivityChange = "activity_change"
 )
 
 // NotificationTypeValues 全部通知类型值。
-var NotificationTypeValues = []string{NotificationSignupSuccess, NotificationReminder, NotificationReviewResult, NotificationCheckinSuccess}
+var NotificationTypeValues = []string{NotificationSignupSuccess, NotificationReminder, NotificationReviewResult, NotificationCheckinSuccess, NotificationActivityChange}
 
 // UserRole 用户角色枚举。
 const (

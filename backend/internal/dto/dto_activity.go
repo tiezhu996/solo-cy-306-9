@@ -18,10 +18,13 @@ type ActivityCreateRequest struct {
 
 // ActivityUpdateRequest 更新活动请求。
 type ActivityUpdateRequest struct {
-	Title        string `json:"title" binding:"max=200"`
-	Description  string `json:"description"`
-	CoverImage   string `json:"cover_image" binding:"max=255"`
-	ActivityType string `json:"activity_type" binding:"omitempty,oneof=lecture training party competition"`
-	Location     string `json:"location" binding:"max=255"`
-	Capacity     *int   `json:"capacity" binding:"min=0"`
+	Title          string     `json:"title" binding:"max=200"`
+	Description    string     `json:"description"`
+	CoverImage     string     `json:"cover_image" binding:"max=255"`
+	ActivityType   string     `json:"activity_type" binding:"omitempty,oneof=lecture training party competition"`
+	StartTime      *time.Time `json:"start_time"`
+	EndTime        *time.Time `json:"end_time"`
+	Location       string     `json:"location" binding:"max=255"`
+	Capacity       *int       `json:"capacity" binding:"min=0"`
+	SignupDeadline *time.Time `json:"signup_deadline"`
 }

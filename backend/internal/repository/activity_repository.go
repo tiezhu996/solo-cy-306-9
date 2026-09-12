@@ -131,6 +131,14 @@ func (r *ActivityRepository) Update(a *model.Activity) error {
 	return nil
 }
 
+// UpdateTx 在事务内更新活动。
+func (r *ActivityRepository) UpdateTx(tx *gorm.DB, a *model.Activity) error {
+	if err := tx.Save(a).Error; err != nil {
+		return fmt.Errorf("update activity: %w", err)
+	}
+	return nil
+}
+
 // Delete 删除活动。
 func (r *ActivityRepository) Delete(id uint64) error {
 	if err := r.db.Delete(&model.Activity{}, id).Error; err != nil {

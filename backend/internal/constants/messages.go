@@ -30,5 +30,6 @@ const (
 	MsgFavoriteRemoved     = "已取消收藏"
 	MsgActivityPublished   = "活动已发布"
 	MsgActivityEndedAction = "活动已结束"
+	MsgActivityChanged     = "活动关键信息已变更"
 	MsgPasswordWeak        = "密码强度不足"
 )

@@ -2,7 +2,9 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"gbevent/internal/constants"
@@ -15,6 +17,7 @@ import (
 
 // ActivityService 活动业务逻辑。
 type ActivityService struct {
+	db          *gorm.DB
 	repo        *repository.ActivityRepository
 	regRepo     *repository.RegistrationRepository
 	notifyRepo  *repository.NotificationRepository
@@ -23,10 +26,10 @@ type ActivityService struct {
 }
 
 // NewActivityService 构造活动服务。
-func NewActivityService(repo *repository.ActivityRepository, regRepo *repository.RegistrationRepository,
+func NewActivityService(db *gorm.DB, repo *repository.ActivityRepository, regRepo *repository.RegistrationRepository,
 	notifyRepo *repository.NotificationRepository, checkinRepo *repository.CheckInRecordRepository,
 	logger *slog.Logger) *ActivityService {
-	return &ActivityService{repo: repo, regRepo: regRepo, notifyRepo: notifyRepo, checkinRepo: checkinRepo, logger: logger}
+	return &ActivityService{db: db, repo: repo, regRepo: regRepo, notifyRepo: notifyRepo, checkinRepo: checkinRepo, logger: logger}
 }
 
 // Create 创建活动。
@@ -63,40 +66,160 @@ func (s *ActivityService) Create(organizerID uint64, title, description, coverIm
 }
 
 // Update 更新活动（仅发布者或管理员）。
+// 已发布活动的 title/start_time/end_time/location/capacity 变更后，会向每位有效报名者
+// （status != cancelled）合并发送一条 activity_change 未读通知；草稿保存或仅修改无关字段不发送。
 func (s *ActivityService) Update(id, operatorID uint64, operatorRole string, fields map[string]any) (*model.Activity, error) {
-	a, err := s.repo.FindByID(id)
-	if err != nil {
-		return nil, util.Wrap(err, "Activity[id=%d] update find failed", id)
-	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return nil, util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] update forbidden: organizer not match")
-	}
-	if v, ok := fields["title"].(string); ok && v != "" {
-		a.Title = v
-	}
-	if v, ok := fields["description"].(string); ok {
-		a.Description = v
-	}
-	if v, ok := fields["cover_image"].(string); ok {
-		a.CoverImage = v
-	}
-	if v, ok := fields["activity_type"].(string); ok && v != "" {
-		if !constants.IsValidActivityType(v) {
-			return nil, util.NewAppError(constants.CodeValidationFailed, "Activity[id="+itoa(id)+"] update: invalid activity_type="+v)
+	var a *model.Activity
+	var changed []activityFieldChange
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		cur, err := s.repo.FindByIDForUpdate(tx, id)
+		if err != nil {
+			return util.Wrap(err, "Activity[id=%d] update find failed", id)
 		}
-		a.ActivityType = v
+		if operatorRole != constants.RoleAdmin && cur.OrganizerID != operatorID {
+			return util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] update forbidden: organizer not match")
+		}
+
+		// 保存关键字段旧值，更新后再比对生成变更明细。
+		old := *cur
+
+		if v, ok := fields["title"].(string); ok && v != "" {
+			cur.Title = v
+		}
+		if v, ok := fields["description"].(string); ok {
+			cur.Description = v
+		}
+		if v, ok := fields["cover_image"].(string); ok {
+			cur.CoverImage = v
+		}
+		if v, ok := fields["activity_type"].(string); ok && v != "" {
+			if !constants.IsValidActivityType(v) {
+				return util.NewAppError(constants.CodeValidationFailed, "Activity[id="+itoa(id)+"] update: invalid activity_type="+v)
+			}
+			cur.ActivityType = v
+		}
+		if v, ok := fields["start_time"].(time.Time); ok {
+			cur.StartTime = v.In(time.Local)
+		}
+		if v, ok := fields["end_time"].(time.Time); ok {
+			cur.EndTime = v.In(time.Local)
+		}
+		if v, ok := fields["signup_deadline"].(time.Time); ok {
+			cur.SignupDeadline = v.In(time.Local)
+		}
+		if v, ok := fields["location"].(string); ok {
+			cur.Location = v
+		}
+		if v, ok := fields["capacity"].(int); ok {
+			cur.Capacity = v
+		}
+
+		if err := s.repo.UpdateTx(tx, cur); err != nil {
+			return util.Wrap(err, "Activity[id=%d] update save failed", id)
+		}
+
+		// 仅已发布活动需要通知；草稿编辑、发布/结束动作各自的流程不产生变更提醒。
+		if cur.Status == constants.ActivityStatusPublished {
+			changed = buildActivityFieldChanges(&old, cur)
+			if len(changed) > 0 {
+				if err := s.notifyActivityChangeTx(tx, cur, changed); err != nil {
+					return util.Wrap(err, "Activity[id=%d] update notify failed", id)
+				}
+			}
+		}
+		a = cur
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if v, ok := fields["location"].(string); ok {
-		a.Location = v
-	}
-	if v, ok := fields["capacity"].(int); ok {
-		a.Capacity = v
-	}
-	if err := s.repo.Update(a); err != nil {
-		return nil, util.Wrap(err, "Activity[id=%d] update save failed", id)
-	}
-	s.logger.Info(constants.LogActivityUpdateSuccess, "activity_id", a.ID)
+	s.logger.Info(constants.LogActivityUpdateSuccess, "activity_id", a.ID, "changed_fields", len(changed))
 	return a, nil
+}
+
+// activityFieldChange 单个关键信息字段的旧值/新值。
+type activityFieldChange struct {
+	label string
+	oldV  string
+	newV  string
+}
+
+// buildActivityFieldChanges 比对关键字段，返回实际发生变化的字段列表。
+func buildActivityFieldChanges(old, cur *model.Activity) []activityFieldChange {
+	changes := make([]activityFieldChange, 0, 5)
+	if old.Title != cur.Title {
+		changes = append(changes, activityFieldChange{"标题", old.Title, cur.Title})
+	}
+	if !old.StartTime.Equal(cur.StartTime) {
+		changes = append(changes, activityFieldChange{"开始时间", util.FormatDateTime(old.StartTime), util.FormatDateTime(cur.StartTime)})
+	}
+	if !old.EndTime.Equal(cur.EndTime) {
+		changes = append(changes, activityFieldChange{"结束时间", util.FormatDateTime(old.EndTime), util.FormatDateTime(cur.EndTime)})
+	}
+	if old.Location != cur.Location {
+		changes = append(changes, activityFieldChange{"地点", old.Location, cur.Location})
+	}
+	if old.Capacity != cur.Capacity {
+		changes = append(changes, activityFieldChange{"名额", formatCapacityText(old.Capacity), formatCapacityText(cur.Capacity)})
+	}
+	return changes
+}
+
+// formatCapacityText 名额展示，0 表示不限。
+func formatCapacityText(capacity int) string {
+	if capacity <= 0 {
+		return "不限"
+	}
+	return fmt.Sprintf("%d", capacity)
+}
+
+// renderActivityChangeContent 将多个字段变更合并为一条通知正文。
+func renderActivityChangeContent(activityTitle string, changes []activityFieldChange) string {
+	var b strings.Builder
+	b.WriteString("您报名的活动《")
+	b.WriteString(activityTitle)
+	b.WriteString("》关键信息发生变更：")
+	for i, ch := range changes {
+		if i > 0 {
+			b.WriteString("；")
+		}
+		b.WriteString(ch.label)
+		b.WriteString("由「")
+		b.WriteString(ch.oldV)
+		b.WriteString("」变更为「")
+		b.WriteString(ch.newV)
+		b.WriteString("」")
+	}
+	b.WriteString("。请留意最新安排。")
+	return b.String()
+}
+
+// notifyActivityChangeTx 在事务内向每位有效报名者写入同一条未读变更提醒。
+func (s *ActivityService) notifyActivityChangeTx(tx *gorm.DB, a *model.Activity, changes []activityFieldChange) error {
+	userIDs, err := s.regRepo.ListValidUserIDsByActivityTx(tx, a.ID)
+	if err != nil {
+		return util.Wrap(err, "Activity[id=%d] list valid registrations failed", a.ID)
+	}
+	if len(userIDs) == 0 {
+		return nil
+	}
+	s.logger.Info(constants.LogActivityChangeNotifyStart, "activity_id", a.ID, "recipients", len(userIDs), "changed_fields", len(changes))
+	content := renderActivityChangeContent(a.Title, changes)
+	notifications := make([]*model.Notification, 0, len(userIDs))
+	for _, uid := range userIDs {
+		notifications = append(notifications, &model.Notification{
+			UserID:           uid,
+			NotificationType: constants.NotificationActivityChange,
+			Title:            constants.MsgActivityChanged,
+			Content:          content,
+		})
+	}
+	if err := s.notifyRepo.BatchCreateTx(tx, notifications); err != nil {
+		s.logger.Error(constants.LogActivityChangeNotifyFailed, "activity_id", a.ID, "error", err)
+		return util.Wrap(err, "Activity[id=%d] change notifications create failed", a.ID)
+	}
+	s.logger.Info(constants.LogActivityChangeNotifySuccess, "activity_id", a.ID, "recipients", len(userIDs))
+	return nil
 }
 
 // Publish 发布活动（draft -> published）。

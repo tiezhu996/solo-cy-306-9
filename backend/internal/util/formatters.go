@@ -94,6 +94,8 @@ func NotificationTypeText(t string) string {
 		return "审核结果"
 	case constants.NotificationCheckinSuccess:
 		return "签到成功"
+	case constants.NotificationActivityChange:
+		return "活动变更"
 	default:
 		return t
 	}

@@ -4,6 +4,7 @@ export const NotificationType = {
   REMINDER: 'reminder',
   REVIEW_RESULT: 'review_result',
   CHECKIN_SUCCESS: 'checkin_success',
+  ACTIVITY_CHANGE: 'activity_change',
 } as const
 
 export const NotificationTypeText: Record<string, string> = {
@@ -11,6 +12,7 @@ export const NotificationTypeText: Record<string, string> = {
   [NotificationType.REMINDER]: '活动提醒',
   [NotificationType.REVIEW_RESULT]: '审核结果',
   [NotificationType.CHECKIN_SUCCESS]: '签到成功',
+  [NotificationType.ACTIVITY_CHANGE]: '活动变更',
 }
 
 export const UserRole = {
