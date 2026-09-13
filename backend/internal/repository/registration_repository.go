@@ -137,7 +137,9 @@ func (r *RegistrationRepository) ListByActivity(activityID uint64) ([]model.Regi
 	return list, nil
 }
 
-// ListValidUserIDsByActivity 查询某活动全部有效报名（未取消，含已签到）的去重用户 ID。
+// ListValidUserIDsByActivity 查询某活动全部有效报名的去重用户 ID。
+// 有效报名：报名未取消（status != cancelled）且审核未被拒绝（review_status != rejected），
+// 含待审核、已通过与已签到人员；取消者与被拒绝者不进入活动变更提醒名单。
 func (r *RegistrationRepository) ListValidUserIDsByActivity(activityID uint64) ([]uint64, error) {
 	return r.listValidUserIDsByActivity(r.db, activityID)
 }
@@ -150,7 +152,8 @@ func (r *RegistrationRepository) ListValidUserIDsByActivityTx(tx *gorm.DB, activ
 func (r *RegistrationRepository) listValidUserIDsByActivity(db *gorm.DB, activityID uint64) ([]uint64, error) {
 	var userIDs []uint64
 	if err := db.Model(&model.Registration{}).
-		Where("activity_id = ? AND status <> ?", activityID, "cancelled").
+		Where("activity_id = ? AND status <> ? AND review_status <> ?",
+			activityID, "cancelled", "rejected").
 		Distinct().Pluck("user_id", &userIDs).Error; err != nil {
 		return nil, fmt.Errorf("list valid registration user ids: %w", err)
 	}

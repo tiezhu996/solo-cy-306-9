@@ -80,9 +80,13 @@ const (
 	userBP uint64 = 3 // 待审核（registered + pending）
 	userCC uint64 = 4 // 已签到（checked_in + approved）
 	userXX uint64 = 5 // 已取消（cancelled）
+	userRJ uint64 = 6 // 已拒绝（registered + rejected，审核拒绝不改变 status）
 )
 
-// seedUsers 写入组织者与四类报名用户。
+// 不应收到活动变更提醒的用户（取消者、被拒绝者）。
+var excludedFromChange = []uint64{userXX, userRJ}
+
+// seedUsers 写入组织者与五类报名用户。
 func (f *changeFixture) seedUsers() {
 	users := []model.User{
 		{ID: orgID, Username: "org", PasswordHash: "x", Nickname: "组织者", Role: constants.RoleOrganizer},
@@ -90,6 +94,7 @@ func (f *changeFixture) seedUsers() {
 		{ID: userBP, Username: "bob", PasswordHash: "x", Nickname: "Bob", Role: constants.RoleUser},
 		{ID: userCC, Username: "carol", PasswordHash: "x", Nickname: "Carol", Role: constants.RoleUser},
 		{ID: userXX, Username: "dave", PasswordHash: "x", Nickname: "Dave", Role: constants.RoleUser},
+		{ID: userRJ, Username: "erin", PasswordHash: "x", Nickname: "Erin", Role: constants.RoleUser},
 	}
 	if err := f.db.Create(&users).Error; err != nil {
 		f.t.Fatalf("seed users: %v", err)
@@ -101,14 +106,14 @@ func (f *changeFixture) seedActivity(id uint64, status string) *model.Activity {
 	start := time.Now().Add(72 * time.Hour)
 	a := &model.Activity{
 		ID: id, Title: "原标题", Description: "原描述", CoverImage: "",
-		ActivityType: constants.ActivityTypeLecture,
-		StartTime:    start,
-		EndTime:      start.Add(2 * time.Hour),
-		Location:     "原地点 A 座",
-		Capacity:     100,
+		ActivityType:   constants.ActivityTypeLecture,
+		StartTime:      start,
+		EndTime:        start.Add(2 * time.Hour),
+		Location:       "原地点 A 座",
+		Capacity:       100,
 		SignupDeadline: start.Add(-time.Hour),
-		Status:       status,
-		OrganizerID:  orgID,
+		Status:         status,
+		OrganizerID:    orgID,
 	}
 	if err := f.db.Create(a).Error; err != nil {
 		f.t.Fatalf("seed activity: %v", err)
@@ -133,12 +138,25 @@ func (f *changeFixture) seedRegistration(activityID, userID uint64, status, revi
 	return r
 }
 
-// seedAllKindsOfRegistrations 写入三类有效报名 + 一个取消者。
+// seedAllKindsOfRegistrations 写入三类有效报名 + 一个取消者 + 一个被拒绝者。
 func (f *changeFixture) seedAllKindsOfRegistrations(activityID uint64) {
 	f.seedRegistration(activityID, userAP, constants.RegistrationStatusRegistered, constants.ReviewStatusApproved)
 	f.seedRegistration(activityID, userBP, constants.RegistrationStatusRegistered, constants.ReviewStatusPending)
 	f.seedRegistration(activityID, userCC, constants.RegistrationStatusCheckedIn, constants.ReviewStatusApproved)
 	f.seedRegistration(activityID, userXX, constants.RegistrationStatusCancelled, constants.ReviewStatusApproved)
+	f.seedRegistration(activityID, userRJ, constants.RegistrationStatusRegistered, constants.ReviewStatusRejected)
+}
+
+// validChangeRecipients 三类有效报名者，顺序固定：已报名 → 待审核 → 已签到。
+var validChangeRecipients = []uint64{userAP, userBP, userCC}
+
+// assertExcludedGetNoChange 断言取消者/被拒绝者都没有收到活动变更提醒。
+func (f *changeFixture) assertExcludedGetNoChange() {
+	for _, uid := range excludedFromChange {
+		if n := f.listChangeNotifications(uid); len(n) != 0 {
+			f.t.Fatalf("excluded user %d must not be notified, got %d notifications", uid, len(n))
+		}
+	}
 }
 
 // listChangeNotifications 回读某用户的「活动变更」提醒（按 created_at DESC）。
@@ -203,7 +221,7 @@ func TestActivityChange_AllKeyFieldsMergedIntoOne(t *testing.T) {
 	}
 
 	// 三位有效报名者各收到恰好一条，且为未读、多字段合并、含旧值与新值。
-	for _, uid := range []uint64{userAP, userBP, userCC} {
+	for _, uid := range validChangeRecipients {
 		notes := f.listChangeNotifications(uid)
 		if len(notes) != 1 {
 			t.Fatalf("user %d: expected 1 merged notification, got %d", uid, len(notes))
@@ -236,12 +254,13 @@ func TestActivityChange_AllKeyFieldsMergedIntoOne(t *testing.T) {
 		}
 	}
 
-	// 取消者不收。
-	if n := f.listChangeNotifications(userXX); len(n) != 0 {
-		t.Fatalf("cancelled registration must not be notified, got %d", len(n))
-	}
+	// 取消者与被拒绝者都不收，且没有任何通知。
+	f.assertExcludedGetNoChange()
 	if total := f.notificationCount(userXX); total != 0 {
 		t.Fatalf("cancelled user must have zero notifications, got %d", total)
+	}
+	if total := f.notificationCount(userRJ); total != 0 {
+		t.Fatalf("rejected user must have zero new notifications, got %d", total)
 	}
 }
 
@@ -257,7 +276,7 @@ func TestActivityChange_DraftDoesNotNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update draft: %v", err)
 	}
-	for _, uid := range []uint64{userAP, userBP, userCC, userXX} {
+	for _, uid := range []uint64{userAP, userBP, userCC, userXX, userRJ} {
 		if n := f.listChangeNotifications(uid); len(n) != 0 {
 			t.Fatalf("draft edit must not notify user %d, got %d", uid, len(n))
 		}
@@ -284,9 +303,111 @@ func TestActivityChange_EndedDoesNotNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update ended: %v", err)
 	}
-	for _, uid := range []uint64{userAP, userBP, userCC} {
+	for _, uid := range validChangeRecipients {
 		if n := f.listChangeNotifications(uid); len(n) != 0 {
 			t.Fatalf("ended activity edit/end must not notify user %d, got %d", uid, len(n))
+		}
+	}
+}
+
+// 场景 3b（缺陷复现）：走真实审核拒绝流程后，组织者再编辑关键字段，
+// 被拒绝者不再收到新的变更提醒，其既有报名/审核通知仍可回读；
+// 已报名、待审核、已签到三类人员照常各收一条。
+func TestActivityChange_RejectedRegistrationExcludedAfterReview(t *testing.T) {
+	f := newChangeFixture(t)
+	f.seedUsers()
+	a := f.seedActivity(110, constants.ActivityStatusPublished)
+
+	// Erin 走真实在线报名（registered + pending，收到报名成功通知）。
+	erinReg, err := f.regSvc.Create(a.ID, userRJ, "Erin", "13900000005", "")
+	if err != nil {
+		t.Fatalf("erin signup: %v", err)
+	}
+	// 组织者审核拒绝（只改 review_status=rejected，status 仍为 registered）。
+	if _, err := f.regSvc.Review(erinReg.ID, orgID, constants.RoleOrganizer, constants.ReviewStatusRejected); err != nil {
+		t.Fatalf("review reject: %v", err)
+	}
+	got := f.findActivity(a.ID)
+	_ = got
+	var reg model.Registration
+	if err := f.db.First(&reg, erinReg.ID).Error; err != nil {
+		t.Fatalf("reload rejected registration: %v", err)
+	}
+	if reg.Status != constants.RegistrationStatusRegistered || reg.ReviewStatus != constants.ReviewStatusRejected {
+		t.Fatalf("rejected registration should stay status=registered, review_status=rejected, got status=%s review=%s",
+			reg.Status, reg.ReviewStatus)
+	}
+
+	// 三类有效报名者（已通过、待审核、已签到）。
+	f.seedRegistration(a.ID, userAP, constants.RegistrationStatusRegistered, constants.ReviewStatusApproved)
+	f.seedRegistration(a.ID, userBP, constants.RegistrationStatusRegistered, constants.ReviewStatusPending)
+	checkedIn := f.seedRegistration(a.ID, userCC, constants.RegistrationStatusRegistered, constants.ReviewStatusApproved)
+	checkedIn.Status = constants.RegistrationStatusCheckedIn
+	if err := f.db.Save(checkedIn).Error; err != nil {
+		t.Fatalf("mark checked in: %v", err)
+	}
+
+	// 拒绝后再编辑标题/开始时间/结束时间/地点/名额（缺陷触发点）。
+	newStart := a.StartTime.Add(6 * time.Hour)
+	if _, err := f.activitySvc.Update(a.ID, orgID, constants.RoleOrganizer, map[string]any{
+		"title":      "拒绝后改的标题",
+		"start_time": newStart,
+		"end_time":   newStart.Add(2 * time.Hour),
+		"location":   "拒绝后改的地点",
+		"capacity":   66,
+	}); err != nil {
+		t.Fatalf("update after rejection: %v", err)
+	}
+
+	// 被拒绝者：零变更提醒。
+	if notes := f.listChangeNotifications(userRJ); len(notes) != 0 {
+		t.Fatalf("rejected registration must not receive change notifications, got %d", len(notes))
+	}
+	// 被拒绝者既有的报名成功 + 审核结果通知仍可正常回读，不受影响。
+	list, total, err := f.notifySvc.ListMine(userRJ, 1, 100)
+	if err != nil {
+		t.Fatalf("list erin notifications: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("rejected user should retain 2 flow notifications (signup+review), got %d", total)
+	}
+	types := map[string]bool{}
+	for _, item := range list {
+		types[item.(map[string]any)["notification_type"].(string)] = true
+	}
+	if !types[constants.NotificationSignupSuccess] || !types[constants.NotificationReviewResult] {
+		t.Fatalf("retained notifications should be signup_success + review_result, got %v", types)
+	}
+
+	// 三类有效报名者各收到恰好一条，且内容含全部五组旧值/新值。
+	for idx, uid := range validChangeRecipients {
+		notes := f.listChangeNotifications(uid)
+		if len(notes) != 1 {
+			t.Fatalf("valid recipient %d (index %d, order 已报名→待审核→已签到) expected 1 notification, got %d", uid, idx, len(notes))
+		}
+		content := notes[0]["content"].(string)
+		for _, want := range []string{"标题由「", "开始时间由「", "结束时间由「", "地点由「", "名额由「", "100", "66"} {
+			if !strings.Contains(content, want) {
+				t.Errorf("recipient %d: content %q missing %q", uid, content, want)
+			}
+		}
+	}
+
+	// 再连续编辑一次（仅地点）：被拒绝者仍为 0，三类有效者各累计 2 条。
+	if _, err := f.activitySvc.Update(a.ID, orgID, constants.RoleOrganizer, map[string]any{
+		"location": "第二次改地点",
+	}); err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+	if notes := f.listChangeNotifications(userRJ); len(notes) != 0 {
+		t.Fatalf("rejected registration must not receive the 2nd change notification either, got %d", len(notes))
+	}
+	if total := f.notificationCount(userRJ); total != 2 {
+		t.Fatalf("rejected user notification count must stay 2, got %d", total)
+	}
+	for _, uid := range validChangeRecipients {
+		if notes := f.listChangeNotifications(uid); len(notes) != 2 {
+			t.Fatalf("valid recipient %d expected 2 notifications after 2 edits, got %d", uid, len(notes))
 		}
 	}
 }
@@ -306,7 +427,7 @@ func TestActivityChange_UnrelatedFieldsDoNotNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update unrelated fields: %v", err)
 	}
-	for _, uid := range []uint64{userAP, userBP, userCC, userXX} {
+	for _, uid := range []uint64{userAP, userBP, userCC, userXX, userRJ} {
 		if n := f.listChangeNotifications(uid); len(n) != 0 {
 			t.Fatalf("unrelated-field edit must not notify user %d, got %d", uid, len(n))
 		}
@@ -329,7 +450,7 @@ func TestActivityChange_UnchangedKeyFieldsDoNotNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save unchanged: %v", err)
 	}
-	for _, uid := range []uint64{userAP, userBP, userCC} {
+	for _, uid := range validChangeRecipients {
 		if n := f.listChangeNotifications(uid); len(n) != 0 {
 			t.Fatalf("saving unchanged key fields must not notify user %d, got %d", uid, len(n))
 		}
@@ -363,7 +484,7 @@ func TestActivityChange_ConsecutiveEditsReflectEachDelta(t *testing.T) {
 		t.Fatalf("edit 3: %v", err)
 	}
 
-	for _, uid := range []uint64{userAP, userBP, userCC} {
+	for _, uid := range validChangeRecipients {
 		notes := f.listChangeNotifications(uid)
 		if len(notes) != 3 {
 			t.Fatalf("user %d: expected 3 notifications (one per edit), got %d", uid, len(notes))
@@ -423,7 +544,7 @@ func TestActivityChange_UnauthorizedEditChangesNothing(t *testing.T) {
 		t.Fatalf("activity must be unchanged after forbidden edit: %+v", got)
 	}
 	// 不产生任何通知（含操作者本人与其他报名者）。
-	for _, uid := range []uint64{userAP, userBP, userCC, userXX} {
+	for _, uid := range []uint64{userAP, userBP, userCC, userXX, userRJ} {
 		if n := f.listChangeNotifications(uid); len(n) != 0 {
 			t.Fatalf("forbidden edit must not notify user %d, got %d", uid, len(n))
 		}
@@ -442,7 +563,7 @@ func TestActivityChange_AdminCanEditAndNotify(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("admin update: %v", err)
 	}
-	for _, uid := range []uint64{userAP, userBP, userCC} {
+	for _, uid := range validChangeRecipients {
 		if n := f.listChangeNotifications(uid); len(n) != 1 {
 			t.Fatalf("admin edit should notify valid registrant %d, got %d", uid, len(n))
 		}
@@ -597,6 +718,44 @@ func TestActivityChange_Regression_CoreFlowsStillWork(t *testing.T) {
 		t.Errorf("checked_in_count = %v, want 1", stats["checked_in_count"])
 	}
 
+	// 7.5) 取消流程回归：Carol 报名后取消（registered -> cancelled），
+	// 取消本身不产生通知；随后编辑关键字段，她不进入提醒名单，也不影响其他有效者。
+	carolReg, err := f.regSvc.Create(a.ID, userCC, "Carol", "13900000003", "")
+	if err != nil {
+		t.Fatalf("carol signup: %v", err)
+	}
+	canceled, err := f.regSvc.Cancel(carolReg.ID, userCC, constants.RoleUser)
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if canceled.Status != constants.RegistrationStatusCancelled {
+		t.Fatalf("status = %s, want cancelled", canceled.Status)
+	}
+	// 已取消后再取消应冲突。
+	if _, err := f.regSvc.Cancel(carolReg.ID, userCC, constants.RoleUser); err == nil {
+		t.Fatal("cancelling twice must fail")
+	}
+	carolSignupNotices := f.notificationCount(userCC) // 取消前的报名成功通知仍保留可回读
+	if carolSignupNotices != 1 {
+		t.Fatalf("carol should retain her signup notification for readback, got %d", carolSignupNotices)
+	}
+	if _, err := f.activitySvc.Update(a.ID, orgID, constants.RoleOrganizer, map[string]any{
+		"title": "取消之后改标题",
+	}); err != nil {
+		t.Fatalf("update after cancel: %v", err)
+	}
+	if notes := f.listChangeNotifications(userCC); len(notes) != 0 {
+		t.Fatalf("cancelled registrant must not be notified after later edit, got %d", len(notes))
+	}
+	if total := f.notificationCount(userCC); total != carolSignupNotices {
+		t.Fatalf("cancelled registrant notifications must stay at %d (readback intact), got %d", carolSignupNotices, total)
+	}
+	for _, uid := range []uint64{userAP, userBP} {
+		if notes := f.listChangeNotifications(uid); len(notes) != 1 {
+			t.Fatalf("valid registrant %d should still receive exactly 1 change notification, got %d", uid, len(notes))
+		}
+	}
+
 	// 8) 结束活动，结束动作不产生变更提醒。
 	ended, err := f.activitySvc.End(a.ID, orgID, constants.RoleOrganizer)
 	if err != nil {
@@ -606,8 +765,8 @@ func TestActivityChange_Regression_CoreFlowsStillWork(t *testing.T) {
 		t.Fatalf("status = %s, want ended", ended.Status)
 	}
 	for _, uid := range []uint64{userAP, userBP} {
-		if n := f.listChangeNotifications(uid); len(n) != 0 {
-			t.Fatalf("end must not create change notifications for %d, got %d", uid, len(n))
+		if notes := f.listChangeNotifications(uid); len(notes) != 1 {
+			t.Fatalf("end must not create additional change notifications for %d, got %d", uid, len(notes))
 		}
 	}
 }
