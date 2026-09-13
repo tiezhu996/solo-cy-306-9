@@ -25,6 +25,6 @@ type ActivityUpdateRequest struct {
 	StartTime      *time.Time `json:"start_time"`
 	EndTime        *time.Time `json:"end_time"`
 	Location       string     `json:"location" binding:"max=255"`
-	Capacity       *int       `json:"capacity" binding:"min=0"`
+	Capacity       *int       `json:"capacity" binding:"omitempty,min=0"`
 	SignupDeadline *time.Time `json:"signup_deadline"`
 }

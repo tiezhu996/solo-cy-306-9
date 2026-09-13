@@ -34,7 +34,7 @@ cd backend && go mod tidy && go run ./cmd/server
 
 构建：`cd backend && go build ./...`
 
-运行测试（集成测试使用纯 Go 的内存 SQLite，无需启动 MySQL）：
+运行测试（集成测试使用纯 Go 的内存 SQLite，无需启动 MySQL；同时覆盖 service 业务层与基于 httptest 的 HTTP 接口层）：
 
 ```bash
 cd backend && go test ./...
