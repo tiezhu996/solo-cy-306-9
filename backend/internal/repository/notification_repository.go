@@ -56,7 +56,8 @@ func (r *NotificationRepository) ListByUser(userID uint64, page, pageSize int) (
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count notifications: %w", err)
 	}
-	if err := q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&list).Error; err != nil {
+	// 同毫秒内可能连续写入多条（如组织者连续编辑），以 id DESC 作为稳定次序兜底。
+	if err := q.Order("created_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&list).Error; err != nil {
 		return nil, 0, fmt.Errorf("list notifications: %w", err)
 	}
 	return list, total, nil
